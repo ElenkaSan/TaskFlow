@@ -6,6 +6,14 @@ import express, {
 } from "express";
 import { randomUUID } from "node:crypto";
 import { withTransaction, type SqliteDatabase } from "./database.js";
+import {
+  acceptAssignment,
+  assignManually,
+  declineAssignment,
+  insertRoutingAttempt,
+  reportPreWorkFailure,
+  retryRouting,
+} from "./transitions.js";
 
 type ApiError = Error & { status?: number; code?: string; details?: unknown };
 type TaskRow = {
@@ -41,36 +49,25 @@ const taskJson = (task: TaskRow) => ({
   updatedAt: task.updated_at,
 });
 
-async function routingAttempt(
-  db: SqliteDatabase,
-  taskId: string,
-  requiredExpertise: string,
-  now: Date,
-) {
-  const contributors = await db.all<{ id: string }>(
-    "SELECT id FROM contributors WHERE active = 1 AND expertise = ? ORDER BY id",
-    [requiredExpertise],
-  );
-  const outcome = Math.random() < 0.2 ? "no_response" : "success";
-  const selected = contributors.length
-    ? contributors[Math.floor(Math.random() * contributors.length)].id
-    : null;
-  const delay = 5 + Math.floor(Math.random() * 16);
-  await db.run(
-    `INSERT INTO routing_attempts (id, task_id, status, outcome, due_at, warning_at, selected_contributor_id, task_version_at_creation, created_at) VALUES (?, ?, 'pending', ?, ?, ?, ?, 1, ?)`,
-    [
-      randomUUID(),
-      taskId,
-      outcome,
-      new Date(now.getTime() + delay * 1000).toISOString(),
-      outcome === "no_response"
-        ? new Date(now.getTime() + 25000).toISOString()
-        : null,
-      selected,
-      now.toISOString(),
-    ],
-  );
-}
+const assignmentJson = (assignment: {
+  id: string;
+  task_id: string;
+  contributor_id: string;
+  source: string;
+  status: string;
+  offered_at: string;
+  responded_at: string | null;
+  response_note: string | null;
+}) => ({
+  id: assignment.id,
+  taskId: assignment.task_id,
+  contributorId: assignment.contributor_id,
+  source: assignment.source,
+  status: assignment.status,
+  offeredAt: assignment.offered_at,
+  respondedAt: assignment.responded_at,
+  responseNote: assignment.response_note,
+});
 
 export function createApp(db: SqliteDatabase) {
   const app = express();
@@ -151,7 +148,7 @@ export function createApp(db: SqliteDatabase) {
               now,
             ],
           );
-          await routingAttempt(db, task.id, requiredExpertise, new Date(now));
+          await insertRoutingAttempt(db, task.id, requiredExpertise, new Date(now), task.version);
           await db.run(
             "INSERT INTO audit_events (id,task_id,event_type,actor,details_json,created_at) VALUES (?,?,'task_created','operator',?,?)",
             [randomUUID(), task.id, JSON.stringify({ requiredExpertise }), now],
@@ -181,8 +178,25 @@ export function createApp(db: SqliteDatabase) {
       ]);
       if (!task) throw fail("Task not found.", 404, "not_found");
       const routingAttempts = await db.all(
-        "SELECT id,status,outcome,due_at,warning_at,selected_contributor_id,task_version_at_creation,created_at,completed_at FROM routing_attempts WHERE task_id = ? ORDER BY created_at",
+        "SELECT id,status,outcome,due_at,warning_at,selected_contributor_id,task_version_at_creation,created_at,completed_at FROM routing_attempts WHERE task_id = ? ORDER BY created_at, rowid",
         [task.id],
+      );
+      const assignments = await db.all<{
+        id: string;
+        task_id: string;
+        contributor_id: string;
+        source: string;
+        status: string;
+        offered_at: string;
+        responded_at: string | null;
+        response_note: string | null;
+      }>(
+        "SELECT id, task_id, contributor_id, source, status, offered_at, responded_at, response_note FROM assignments WHERE task_id = ? ORDER BY offered_at, rowid",
+        [task.id],
+      );
+      const eligibleContributors = await db.all<{ id: string; name: string; expertise: string }>(
+        "SELECT id, name, expertise FROM contributors WHERE active = 1 AND expertise = ? ORDER BY id",
+        [task.required_expertise],
       );
       const events = await db.all<{
         id: string;
@@ -191,11 +205,13 @@ export function createApp(db: SqliteDatabase) {
         details_json: string;
         created_at: string;
       }>(
-        "SELECT id,event_type,actor,details_json,created_at FROM audit_events WHERE task_id = ? ORDER BY created_at",
+        "SELECT id,event_type,actor,details_json,created_at FROM audit_events WHERE task_id = ? ORDER BY created_at, rowid",
         [task.id],
       );
       response.json({
         task: taskJson(task),
+        assignments: assignments.map(assignmentJson),
+        eligibleContributors,
         routingAttempts,
         auditEvents: events.map((event) => ({
           id: event.id,
@@ -205,6 +221,49 @@ export function createApp(db: SqliteDatabase) {
           createdAt: event.created_at,
         })),
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.post("/api/tasks/:taskId/assignments", async (request, response, next) => {
+    try {
+      const result = await assignManually(db, request.params.taskId, request.body ?? {});
+      response.status(201).json({
+        task: taskJson(result.task),
+        assignment: assignmentJson(result.assignment),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.post("/api/tasks/:taskId/assignments/:assignmentId/accept", async (request, response, next) => {
+    try {
+      const result = await acceptAssignment(db, request.params.taskId, request.params.assignmentId, request.body ?? {});
+      response.json({ task: taskJson(result.task), assignment: assignmentJson(result.assignment) });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.post("/api/tasks/:taskId/assignments/:assignmentId/decline", async (request, response, next) => {
+    try {
+      const result = await declineAssignment(db, request.params.taskId, request.params.assignmentId, request.body ?? {});
+      response.json({ task: taskJson(result.task), assignment: assignmentJson(result.assignment) });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.post("/api/tasks/:taskId/assignments/:assignmentId/fail", async (request, response, next) => {
+    try {
+      const result = await reportPreWorkFailure(db, request.params.taskId, request.params.assignmentId, request.body ?? {});
+      response.json({ task: taskJson(result.task), assignment: assignmentJson(result.assignment) });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.post("/api/tasks/:taskId/routing", async (request, response, next) => {
+    try {
+      const result = await retryRouting(db, request.params.taskId, request.body ?? {});
+      response.status(201).json({ task: taskJson(result.task), routingAttempt: result.routingAttempt });
     } catch (error) {
       next(error);
     }

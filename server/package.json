@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
-    "test": "tsx tests/api.test.ts",
+    "test": "tsx tests/api.test.ts && tsx tests/intervention.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
