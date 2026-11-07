@@ -84,7 +84,14 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
     throw new ApiError(0, 'network_error', 'The server could not be reached.')
   }
   const text = await response.text()
-  const payload: unknown = text ? JSON.parse(text) : null
+  let payload: unknown = null
+  if (text) {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      throw new ApiError(response.status, response.ok ? 'invalid_response' : 'request_failed', 'The server could not be reached.')
+    }
+  }
   if (!response.ok) {
     const error = record(payload)?.error
     const body = record(error)
@@ -201,6 +208,10 @@ function detailFrom(value: unknown): TaskDetail {
       }
     }) : [],
   }
+}
+
+export function checkHealth(): Promise<void> {
+  return request('/api/health').then(() => undefined)
 }
 
 export function listTasks(): Promise<Task[]> {

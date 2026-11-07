@@ -98,6 +98,38 @@ export function auditText(event: AuditEvent, contributors: Contributor[]): strin
   return `${label} · ${contributorName(contributors, contributorId)}`
 }
 
+export type ConnectionPhase = 'pending' | 'current' | 'disconnected' | 'reconnecting'
+
+export function connectionLabel(phase: ConnectionPhase): string {
+  switch (phase) {
+    case 'current':
+      return 'Up to date'
+    case 'disconnected':
+      return 'Disconnected'
+    case 'reconnecting':
+      return 'Reconnecting'
+    default:
+      return ''
+  }
+}
+
+export function beginConnectionAttempt(phase: ConnectionPhase): ConnectionPhase {
+  return phase === 'disconnected' || phase === 'reconnecting' ? 'reconnecting' : phase
+}
+
+export function applyConnectionResult(_phase: ConnectionPhase, ok: boolean): ConnectionPhase {
+  return ok ? 'current' : 'disconnected'
+}
+
+export function isConnectionFailure(status: number): boolean {
+  return status === 0 || status >= 500
+}
+
+export function nextConnection(phase: ConnectionPhase, event: 'success' | 'failure' | 'retry'): ConnectionPhase {
+  if (event === 'retry') return beginConnectionAttempt(phase)
+  return applyConnectionResult(phase, event === 'success')
+}
+
 export const manualAssignmentUnavailable =
   'Manual assignment is currently unavailable because no matching contributor was found.'
 

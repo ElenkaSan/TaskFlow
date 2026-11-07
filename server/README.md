@@ -26,7 +26,7 @@ The service uses a single Node.js process with a database-backed routing worker.
         React Operator Dashboard
                  |
                  v
-          Express REST API
+           Express REST API
                  |
     +-----+--------------------+
     |                          |
@@ -47,6 +47,60 @@ State Transitions       Startup + Periodic Sweep
 The backend is the authoritative source of task and assignment state.
 
 Routing outcomes and timestamps are persisted before processing so that restarts do not regenerate results or lose outstanding attempts.
+
+## Project Structure
+
+The backend follows a lightweight, modular structure. HTTP endpoints, database operations, routing execution, and assignment transitions are separated by responsibility without introducing unnecessary framework layers.
+
+```text
+server/
+├── src/
+│   ├── app.ts              # Express app, API routes, validation,
+│   │                       # and HTTP error handling
+│   ├── server.ts           # Server startup and routing worker lifecycle
+│   ├── database.ts         # SQLite connection, schema initialization,
+│   │                       # persistence, and database configuration
+│   ├── routing-worker.ts   # Persisted routing attempt processing,
+│   │                       # recovery sweeps, and stale-result protection
+│   └── transitions.ts      # Transactional assignment state changes,
+│                           # manual overrides, acceptance, decline,
+│                           # failure, and explicit retry
+│
+├── tests/
+│   ├── api.test.ts          # API, routing, persistence,
+│   │                        # and restart behavior tests
+│   └── intervention.test.ts # Human intervention, state transitions,
+│                            # concurrency, and recovery tests
+│
+├── .env.example             # Example environment configuration
+├── .gitignore               # Excludes local and generated files
+├── package.json             # Dependencies and development scripts
+├── package-lock.json        # Locked dependency versions
+├── tsconfig.json            # TypeScript compiler configuration
+└── README.md                # Backend architecture and API documentation
+```
+
+### Separation of Responsibilities
+
+| Module | Responsibility |
+|---|---|
+| `app.ts` | HTTP request handling, input validation, response formatting, and API routing |
+| `database.ts` | Database initialization, persistence, and transaction infrastructure |
+| `routing-worker.ts` | Processing persisted routing attempts and reconciling work after restarts |
+| `transitions.ts` | Enforcing assignment lifecycle rules and atomic human interventions |
+| `server.ts` | Starting the API server and routing worker |
+| `api.test.ts` | Verifying API behavior and automatic routing |
+| `intervention.test.ts` | Verifying manual overrides, concurrency protection, and recovery |
+
+### Design Rationale
+
+The architecture separates HTTP transport from assignment state management and background routing.
+
+This keeps the most important business rules independently inspectable and testable.
+
+The application intentionally avoids additional service abstractions, dependency injection frameworks, and distributed infrastructure because they would increase complexity without improving the core assessment requirements.
+
+The codebase is organized around clear responsibilities rather than a large number of folders.
 
 ## API Reference
 
@@ -111,6 +165,46 @@ Operators can manually assign eligible contributors while routing is pending, de
 A manual assignment can replace an outstanding offer but cannot replace an accepted assignment through the normal workflow.
 
 Contributors who previously declined or failed are excluded from subsequent automatic matching for the same task. An operator can still select them explicitly.
+
+### Task State Transitions
+
+The task lifecycle supports automatic assignment, contributor responses, and explicit operator recovery.
+
+```mermaid
+flowchart TD
+    A["Task Created"] --> B["Routing"]
+
+    B -->|Eligible contributor found| C["Offered"]
+    B -->|No eligible contributor| F["Recovery Required"]
+    B -->|No response after 25s| W["No Response Warning"]
+
+    W -->|Manual assignment| C
+    W -->|Operator retry| B
+
+    C -->|Contributor accepts| D["Accepted"]
+    C -->|Contributor declines| F
+
+    D -->|Pre-work failure| E["Pre-work Failed"]
+
+    E -->|Operator retry| B
+    E -->|Manual assignment| C
+
+    F -->|Operator retry| B
+    F -->|Manual assignment| C
+
+    B -->|Manual override| C
+    C -->|Replace outstanding offer| C
+```
+
+**Key rules:**
+
+- An accepted assignment cannot be replaced by normal routing.
+- Manual intervention supersedes outstanding routing attempts.
+- No-response warnings remain unresolved until an operator intervenes.
+- Decline and pre-work failure require explicit recovery.
+- State changes are validated transactionally against the latest task version.
+
+The diagram represents task-level state transitions; routing attempts and individual assignments maintain their own lifecycle records.
 
 ## Consistency and Concurrency
 

@@ -64,6 +64,7 @@ h3 { margin: 1.25rem 0 0.6rem; font-size: 0.92rem; font-weight: 650; }
 
 .connection { color: var(--muted); font-size: 0.92rem; }
 .connection.is-down { color: var(--danger); }
+.connection.is-reconnecting { color: var(--warn); }
 
 .notice, .callout, .empty {
   border: 1px solid var(--line);

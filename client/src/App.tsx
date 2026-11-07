@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   ApiError,
   assignContributor,
+  checkHealth,
   createTask,
   getTask,
   listTasks,
@@ -18,12 +19,16 @@ import {
   assignmentLabel,
   attemptLabel,
   auditText,
+  connectionLabel,
+  isConnectionFailure,
   manualAssignmentUnavailable,
+  nextConnection,
   outcomeLabel,
   statusNotice,
   sourceLabel,
   statusLabel,
   timeLabel,
+  type ConnectionPhase,
 } from './format.ts'
 
 const statuses = [
@@ -43,7 +48,7 @@ export default function App() {
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [connectionError, setConnectionError] = useState<string | null>(null)
+  const [connection, setConnection] = useState<ConnectionPhase>('pending')
   const [notice, setNotice] = useState<Notice | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [filter, setFilter] = useState<string>('all')
@@ -57,6 +62,18 @@ export default function App() {
   const selectedIdRef = useRef<string | null>(null)
   const busyRef = useRef(false)
   const detailRequest = useRef(0)
+  const connectionRef = useRef<ConnectionPhase>('pending')
+  const monitorLock = useRef(false)
+
+  function reportConnection(event: 'success' | 'failure' | 'retry'): void {
+    const next = nextConnection(connectionRef.current, event)
+    connectionRef.current = next
+    setConnection(next)
+  }
+
+  function lostConnection(error: unknown): boolean {
+    return !(error instanceof ApiError) || isConnectionFailure(error.status)
+  }
 
   function selectTask(taskId: string): void {
     selectedIdRef.current = taskId
@@ -108,8 +125,12 @@ export default function App() {
         setTasks(list)
         if (!selectedIdRef.current && list[0]) selectTask(list[0].id)
         setLoadError(null)
+        reportConnection('success')
       } catch (error) {
-        if (!cancel) setLoadError(error instanceof Error ? error.message : 'Tasks could not be loaded.')
+        if (!cancel) {
+          setLoadError(error instanceof Error ? error.message : 'Tasks could not be loaded.')
+          if (lostConnection(error)) reportConnection('failure')
+        }
       } finally {
         if (!cancel) setLoading(false)
       }
@@ -125,9 +146,8 @@ export default function App() {
       if (cancel || requestId !== detailRequest.current) return
       setDetail(next)
       rememberNames(next.eligibleContributors, next.assignments)
-      setConnectionError(null)
     }).catch((error: unknown) => {
-      if (!cancel) setConnectionError(error instanceof Error ? error.message : 'The task could not be loaded.')
+      if (!cancel && lostConnection(error)) reportConnection('failure')
     })
     return () => { cancel = true }
   }, [selectedId])
@@ -139,14 +159,28 @@ export default function App() {
 
   const routing = tasks.some((task) => task.status === 'routing')
   useEffect(() => {
-    if (!routing) return
+    let cancel = false
     const timer = window.setInterval(() => {
-      if (busyRef.current) return
-      void refreshAll().then(() => setConnectionError(null)).catch((error: unknown) => {
-        setConnectionError(error instanceof Error ? error.message : 'Refresh failed.')
+      const phase = connectionRef.current
+      const refreshData = routing || phase !== 'current'
+      if (busyRef.current || monitorLock.current) return
+      if (phase === 'disconnected' || phase === 'reconnecting') reportConnection('retry')
+      monitorLock.current = true
+      const request = refreshData ? refreshAll() : checkHealth()
+      void request.then(() => {
+        if (cancel || !refreshData) return
+        setLoadError(null)
+        reportConnection('success')
+      }).catch((error: unknown) => {
+        if (!cancel && lostConnection(error)) reportConnection('failure')
+      }).finally(() => {
+        monitorLock.current = false
       })
     }, 1500)
-    return () => window.clearInterval(timer)
+    return () => {
+      cancel = true
+      window.clearInterval(timer)
+    }
   }, [routing])
 
   useEffect(() => {
@@ -174,16 +208,28 @@ export default function App() {
     setNotice(null)
     try {
       const message = await action()
-      setNotice({ tone: 'success', text: message })
       await refreshAll()
-      setConnectionError(null)
+      reportConnection('success')
+      setNotice({ tone: 'success', text: message })
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) {
-        setNotice({
-          tone: 'warning',
-          text: 'This task changed on the server. The latest state is shown below. Review it before trying again.',
-        })
-        await refreshAll().catch(() => undefined)
+      if (lostConnection(error)) {
+        reportConnection('failure')
+        setNotice({ tone: 'error', text: 'The server could not be reached.' })
+      } else if (error instanceof ApiError && error.status === 409) {
+        try {
+          await refreshAll()
+          reportConnection('success')
+          setNotice({
+            tone: 'warning',
+            text: 'This task changed on the server. The latest state is shown below. Review it before trying again.',
+          })
+        } catch (refreshError) {
+          if (lostConnection(refreshError)) reportConnection('failure')
+          setNotice({
+            tone: 'warning',
+            text: 'This task changed on the server, but the latest data could not be loaded.',
+          })
+        }
       } else {
         setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'The request failed.' })
       }
@@ -237,8 +283,8 @@ export default function App() {
           <p className="eyebrow">TaskFlow</p>
           <h1>Operator dashboard</h1>
         </div>
-        <p className={connectionError ? 'connection is-down' : 'connection'}>
-          {connectionError ? 'Showing the last update. Refresh failed.' : routing ? 'Watching active routing' : 'Up to date'}
+        <p className={`connection${connection === 'disconnected' ? ' is-down' : ''}${connection === 'reconnecting' ? ' is-reconnecting' : ''}`} role="status">
+          {connectionLabel(connection)}
         </p>
       </header>
 

@@ -9,9 +9,9 @@ with a persisted delay of 5–20 seconds; twenty percent of attempts are
 persisted as no-response attempts.
 
 The implementation stays deliberately small: React client, Express JSON API,
-SQLite, and client polling while a task has active routing or is awaiting a
-contributor response. There is no authentication, real queue, or websocket
-layer for this assessment.
+SQLite, and client polling about every 1.5 seconds while any task is
+`routing`. There is no authentication, real queue, or websocket layer for this
+assessment.
 
 ## Revised task state model
 
@@ -20,8 +20,8 @@ stored separately so that an assignment is never mistaken for acceptance.
 
 | Status | Meaning | Allowed next states |
 | --- | --- | --- |
-| `routing` | An automatic routing attempt is pending. A human may manually assign. | `offered`, `no_response_warning` |
-| `no_response_warning` | The current automated attempt was intentionally simulated to never respond. It remains unresolved; the UI shows a delayed operator warning. | `offered` (manual assignment only) |
+| `routing` | An automatic routing attempt is pending, or routing was explicitly retried. A human may manually assign when someone is eligible. | `offered`, `no_response_warning`, `recovery_required` |
+| `no_response_warning` | The current automated attempt was intentionally simulated to never respond. It remains unresolved; the UI shows a delayed operator warning. | `offered` (manual assignment), `routing` (explicit retry) |
 | `offered` | A contributor has been selected, by automation or a human, and has not yet responded. | `accepted`, `routing`, `recovery_required` |
 | `accepted` | The contributor explicitly accepted. Automatic routing is permanently stopped for this task. | `pre_work_failed` |
 | `pre_work_failed` | The accepted contributor failed before work began. The operator can start recovery. | `routing`, `offered` |
@@ -38,11 +38,15 @@ There is no completion workflow unless it is later requested.
 2. **Automated result:** when a successful attempt becomes due, atomically make
    an `offered` assignment only if the task remains `routing` and the attempt
    remains pending.
-3. **No response:** an attempt created with `outcome = no_response` is never
-   completed or failed. At its persisted `warning_at`, change the task from
-   `routing` to `no_response_warning` and write an audit event. It emits no
-   error and does not self-retry. A manual assignment may still move it to
-   `offered`.
+3. **No response:** an attempt created with `outcome = no_response` and a
+   selected contributor is not marked failed. At its persisted `warning_at`
+   (25 seconds after creation), change the task from `routing` to
+   `no_response_warning`, leave `completed_at` null, and write an audit event.
+   It emits no error and does not self-retry. The operator may assign manually
+   or explicitly retry.
+3a. **No match:** an attempt with no selected contributor becomes
+   `recovery_required` when its `due_at` arrives. That outcome is `success`
+   in storage because no silence was simulated. It is not a no-response warning.
 4. **Manual assignment:** from `routing`, `no_response_warning`,
    `offered`, `pre_work_failed`, or `recovery_required`, create an `offered`
    assignment and cancel/supersede every active routing attempt.
@@ -144,9 +148,9 @@ code is acceptable.
 ## Persisted routing and concurrency guarantees
 
 When an attempt is created, the server chooses and writes `outcome`, `due_at`,
-`warning_at` (for no-response), `selected_contributor_id` (for success), and
-the task version in one transaction. Restarting reads these fields; it never
-rerolls the delay, outcome, or contributor.
+`warning_at` (for no-response), `selected_contributor_id` when someone
+matches, and the task version in one transaction. Restarting reads these
+fields; it never rerolls the delay, outcome, or contributor.
 
 A lightweight periodic worker and a startup recovery pass process due records.
 They do not use process-local `setTimeout` as the source of truth.
@@ -160,24 +164,23 @@ supersede/cancel active attempts as appropriate. A delayed worker that loses
 the race updates zero rows, records an ignored/superseded audit event where
 useful, and cannot overwrite a human decision or acceptance.
 
-## Remaining ambiguity to resolve
+## Decisions recorded in the implementation
 
-1. **Warning delay:** should the no-response warning appear at the 5–20 second
-   due time, or after an additional fixed delay? This plan assumes a separate
-   persisted `warning_at`, initially equal to `due_at` unless a product value
-   is supplied.
-2. **Manual reassignment from an outstanding offer:** this plan permits it and
-   marks the old offer `superseded`; confirm whether an operator should instead
-   be blocked until the contributor responds.
-3. **Retry policy after decline/pre-work failure:** this plan requires an
-   explicit operator action, avoids surprise loops, and excludes declined
-   contributors only for the immediate retry. Confirm whether failure should
-   also permanently exclude that contributor.
-4. **Expertise matching:** this plan assumes exact matching of a single
-   expertise tag. It needs confirmation if tasks/contributors require multiple
-   tags, proficiency levels, or capacity limits.
+1. **Warning delay:** `warning_at` is 25 seconds after the attempt is created,
+   not the 5–20 second `due_at`.
+2. **Manual reassignment:** an operator may replace an outstanding offer. The
+   previous offer becomes `superseded`. An accepted assignment cannot be
+   replaced through the normal workflow.
+3. **Retry policy:** decline, pre-work failure, no-response, and no-match do
+   not start another attempt by themselves. An explicit retry excludes every
+   contributor who declined or failed before work on that task. Manual
+   assignment can still select those people.
+4. **Expertise matching:** one normalized expertise tag, matched exactly.
+   There are no proficiency levels or capacity limits.
 
-## Implementation order after approval
+## Implementation order
+
+These steps are implemented:
 
 1. Add server runtime/configuration, migrations, seed contributors, and task
    read/create APIs.
