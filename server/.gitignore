@@ -8,5 +8,6 @@ dist/
 data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
+data/*.sqlite-journal
 
 .DS_Store

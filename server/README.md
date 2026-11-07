@@ -125,18 +125,44 @@ The codebase is organized around clear responsibilities rather than a large numb
 
 Task-detail responses include routing attempts, assignments, eligible contributors, and audit events.
 
-Mutation requests require the task version last read by the caller.
+`POST /api/tasks`, `POST /api/tasks/:taskId/assignments`, and `POST /api/tasks/:taskId/routing` return HTTP 201. Accept, decline, and fail return HTTP 200. A missing task or unknown route returns HTTP 404 `not_found`.
+
+Mutation requests require the task `version` last read by the caller. Creating a task does not. Task bodies use `requiredExpertise`. Assignment and response bodies use `contributorId`, `version`, and an optional `responseNote`.
+
+### JSON names
+
+Tasks and assignments use camelCase (`requiredExpertise`, `activeAssignmentId`, `offeredAt`, `responseNote`).
+
+Routing attempts on `GET /api/tasks/:taskId`, and the `routingAttempt` object on a successful retry, use snake_case: `due_at`, `warning_at`, `selected_contributor_id`, `task_version_at_creation`, `created_at`, and `completed_at`. The dashboard accepts either spelling when it reads a task detail. It renders the detail payload, not the `routingAttempt` field on the retry response.
+
+### Request errors
+
+A body that is not valid JSON (`entity.parse.failed`) returns:
+
+- HTTP 400
+- code `validation_error`
+- message `Request body must be valid JSON.`
+
+The parser text and the raw body are not included.
+
+A validation failure on a parsed body also uses HTTP 400 `validation_error`, with `Request validation failed.` and a `details` object.
+
+Any other error uses its status, or HTTP 500 when it has none. A status of 500 or higher is logged on the server. The response message is `An unexpected error occurred.` The code is the error’s code, or `internal_error` when it has none. The exception text is not sent to the client. A status below 500 keeps the error message and, when present, `details`.
 
 ## Routing Simulation
 
-The worker simulates an asynchronous assignment service.
+The worker simulates an asynchronous assignment service. On startup, and then every second, it sweeps pending attempts.
 
-- Normal responses arrive after 5–20 seconds.
-- Approximately 20% of attempts never return.
-- Contributors are matched by normalized expertise tags.
-- A no-response request produces a warning after 25 seconds.
-- An unresolved request is not automatically classified as failed.
+Initialization inserts four contributors if they are absent: Ada Lovelace (`frontend`), Grace Hopper (`backend`), Margaret Hamilton (`qa`), and Don Norman (`design`).
+
+- A successful match is due after 5–20 seconds (`5 + floor(random * 16)`). That due time is stored when the attempt is created.
+- When a contributor is selected, about 20% of attempts are stored as `no_response` and never return.
+- A no-response attempt sets `warning_at` to 25 seconds after creation. At that time the task becomes `no_response_warning`. The attempt stays unresolved, and `completed_at` stays null.
+- Contributors are matched by normalized expertise tags. One matching active contributor is chosen at random. Declined and pre-work-failed contributors are excluded from the next automatic attempt for that task.
+- No matching contributor is stored as `outcome = success` with `selected_contributor_id = null`. When due, the task becomes `recovery_required` and no assignment is created.
+- An unresolved request is not classified as a confirmed failure.
 - Automatic retries are not triggered by no-response warnings.
+- Retry is allowed from `routing` only when no attempt is still pending, and from `no_response_warning`, `pre_work_failed`, and `recovery_required`. A pending retry returns HTTP 409 `conflict`. Replacing an offer stays `offered`; it does not return the task to `routing`.
 
 ### Routing Outcomes
 
@@ -212,7 +238,9 @@ The diagram represents task-level state transitions; routing attempts and indivi
 
 **Invariant: Each task has at most one active assignment.**
 
-SQLite transactions and a partial unique index enforce assignment integrity.
+An active assignment is a row whose status is `offered` or `accepted`. The partial unique index `assignments_one_active_idx` is `ON assignments(task_id) WHERE status IN ('offered', 'accepted')`.
+
+Writes that must stay together use `BEGIN IMMEDIATE` on one connection, queued so those writers do not overlap. `PRAGMA foreign_keys = ON`, `journal_mode = WAL`, and `busy_timeout = 5000` are set when the database opens. `active_assignment_id` is not a foreign key. It is set in the same transaction as the assignment row. GET handlers use that connection outside the writer queue. A dirty read during an open transaction was not reproduced.
 
 ### Optimistic Concurrency
 
@@ -240,7 +268,9 @@ Repeated worker sweeps, including processing after restart, must not create dupl
 
 ## Persistence and Audit History
 
-The default database path is `../data/taskflow.sqlite`, resolved from the server directory. That is `data/taskflow.sqlite` at the repository root. Set `DATABASE_PATH` to override it. The example is in `.env.example`.
+The default database path is `../data/taskflow.sqlite`, resolved from the server directory. That is `data/taskflow.sqlite` at the repository root. Set `DATABASE_PATH` to override it. `PORT` defaults to `3001`. Both names are in `.env.example`. The process does not load a `.env` file by itself.
+
+Root `.gitignore` ignores `data/*.sqlite`, `data/*.sqlite-wal`, and `data/*.sqlite-shm`. `server/.gitignore` uses the same three patterns under `server/data/`. A rollback journal name is not covered by a separate ignore rule. WAL mode makes that file unlikely.
 
 SQLite configuration includes:
 
@@ -249,7 +279,7 @@ SQLite configuration includes:
 - Busy timeout for concurrent writers
 - Transactional state updates
 
-Database files are excluded from version control.
+The three ignore patterns above are what keep the local database out of Git.
 
 Meaningful actions are recorded through append-only audit events.
 
@@ -285,7 +315,7 @@ Check API availability:
 curl http://localhost:3001/api/health
 ```
 
-The configured port should be confirmed in `src/server.ts` or the environment configuration.
+`src/server.ts` reads `PORT` and calls `app.listen(port)` without a host, so the process accepts connections on the unspecified address. CORS is open. There is no authentication.
 
 ### Verification
 
@@ -308,9 +338,7 @@ tests/api.test.ts
 tests/intervention.test.ts
 ```
 
-**Milestone 3 verification:** Both test scripts completed successfully in three reported runs on Node.js 20.20.0. TypeScript checking also exited successfully.
-
-The test runner reports completion per script rather than a numeric test count.
+On November 7, 2026, `npm run typecheck` and `npm test` exited 0 on Node.js 20.20.0 and 22.23.4. `package.json` sets `"node": ">=20"`. The test command prints `API and routing tests passed.` and then `Intervention tests passed.` It does not print a numeric count.
 
 Core test coverage includes routing outcomes, restart recovery, repeated worker sweeps, stale task versions, manual overrides, contributor responses, and explicit recovery.
 
@@ -351,11 +379,13 @@ These automated results do not replace manual end-to-end UI verification.
 
 ## Known Limitations
 
-- No authentication or authorization.
+- No authentication or authorization. CORS is open, and the server is not bound to localhost.
 - Contributor responses are simulated through API actions.
-- Repeated mutations using an outdated task version return `409`, rather than replaying the original successful response.
-- The application is designed for a single backend process, not a distributed worker deployment.
-- Routing attempt fields and assignment response fields currently use different naming conventions.
+- Repeated mutations using an outdated task version return HTTP 409 `conflict`, rather than replaying the original successful response. `invalid_assignment` and `invalid_transition` also use HTTP 409. The dashboard shows one conflict sentence for all of them.
+- Malformed JSON is HTTP 400 `validation_error`. Unexpected failures stay HTTP 500 with `An unexpected error occurred.` The client still presents HTTP 500 as a connection failure.
+- The application is designed for a single backend process, not a distributed worker deployment. Two processes can write one file; `BEGIN IMMEDIATE`, `busy_timeout`, and the unique index are the cross-process controls.
+- Routing attempt JSON is snake_case. Tasks and assignments are camelCase.
+- The dashboard history does not render the acceptance note stored on `assignment_accepted` after a later response overwrites `assignments.response_note`.
 - A task with no remaining eligible contributors requires operator intervention.
 
 These limitations are documented rather than hidden.

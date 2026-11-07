@@ -2,7 +2,7 @@
 
 **Human-in-the-Loop Task Assignment System**
 
-TaskFlow is a full-stack application for automated task routing with human oversight, explicit recovery workflows, and persistent assignment history.
+TaskFlow is a full-stack application for automated task routing with human oversight, explicit recovery workflows, and persistent assignment history. Milestones 1–4 are implemented: persistence, automatic routing, human intervention, and the operator dashboard.
 
 The central engineering challenge is ensuring that automated routing and human decisions remain consistent when responses are delayed, never arrive, or become outdated.
 
@@ -57,7 +57,7 @@ The backend is the authoritative source of task and assignment state.
 
 Routing attempts, simulation outcomes, and timestamps are persisted in SQLite. The worker processes pending attempts and reconciles outstanding work after server restarts.
 
-The frontend communicates with the Express API and displays server-confirmed results. During active routing, it polls for updates instead of maintaining a WebSocket connection.
+The frontend communicates with the Express API and displays server-confirmed results. It polls about every 1.5 seconds while any task is `routing`, or while the connection is not current. Otherwise it checks `/api/health`. It does not keep a WebSocket connection.
 
 ## Project Structure
 
@@ -71,7 +71,7 @@ taskflow-assignment/
 │   │   ├── format.ts                # Display and status formatting
 │   │   ├── index.css                # Application styles
 │   │   └── main.tsx                 # React entry point
-│   ├── tests/                       # Frontend checks
+│   ├── tests/                       # Four standalone frontend checks
 │   ├── public/                      # Static assets
 │   ├── vite.config.ts               # Vite setup and development API proxy
 │   └── README.md                    # Frontend documentation
@@ -109,7 +109,7 @@ taskflow-assignment/
 | Testing | Node.js `assert`, API and integration tests, frontend checks |
 | Version Control | Git |
 
-Backend checks have passed on Node.js 20.20.0 and 22.23.4.
+`server/package.json` requires Node.js `>=20`. Backend checks for this documentation pass passed on Node.js 20.20.0 and 22.23.4. Frontend checks passed on Node.js 20.20.0.
 
 ## Key Engineering Decisions
 
@@ -133,7 +133,7 @@ The operator can intervene or explicitly retry.
 
 Each task can have at most one active assignment.
 
-Transactional state transitions and a partial unique index enforce this invariant.
+Transactional state transitions and the partial unique index `assignments_one_active_idx` enforce this invariant. The index covers `assignments(task_id)` where status is `offered` or `accepted`.
 
 Mutations require the latest task version. Stale requests return `HTTP 409 Conflict` rather than silently overwriting newer state.
 
@@ -198,9 +198,9 @@ Open the dashboard:
 
 `http://localhost:5173`
 
-Vite proxies `/api` requests to the local Express server during development.
+Vite proxies `/api` to `http://127.0.0.1:3001`. The API port comes from `PORT` and defaults to `3001`. The database path comes from `DATABASE_PATH` and defaults to `../data/taskflow.sqlite`, resolved from the `server` directory.
 
-For environments where the API runs on another origin, configure `VITE_API_BASE`.
+For an API on another origin, set `VITE_API_BASE` before `npm run dev` or `npm run build`. Leave it unset to use the Vite proxy.
 
 ## Testing & Verification
 
@@ -215,9 +215,11 @@ TaskFlow combines automated API checks, integration testing, and manual end-to-e
 | Frontend status-notice check | Passed |
 | Frontend connection-status check | Passed |
 | Frontend routing-attempt label check | Passed |
+| Frontend detail-load state check | Passed |
 | Manual end-to-end QA | Recorded in `docs/QA_CHECKLIST.md` |
+| Independent engineering QA | READY WITH LIMITATIONS |
 
-Frontend build, lint, and the three standalone client checks were executed successfully on November 7, 2026 on Node.js 20.20.0. Backend typecheck and API/integration tests passed on Node.js 20.20.0 and 22.23.4. Manual scenarios QA-01 through QA-08 are recorded in the checklist. The checklist keeps its own notes: QA-06 did not time the 25-second warning during that manual session, and QA-08 repeated one request rather than issuing simultaneous writes.
+On November 7, 2026, the frontend production build, Oxlint, and the four standalone client checks passed on Node.js 20.20.0. Backend `npm run typecheck` and `npm test` passed on Node.js 20.20.0 and 22.23.4. Manual scenarios QA-01 through QA-08 are recorded as passed in the checklist. The checklist keeps two limits: QA-06 did not time the 25-second warning in that manual session, and QA-08 repeated one request rather than issuing simultaneous writes. Concurrent races are covered by the backend tests and by the independent audit’s isolated probes.
 
 ### Backend
 
@@ -237,12 +239,13 @@ From the `client` directory:
 ```bash
 npm run build
 npm run lint
-npx tsx tests/status-notice.test.ts
-npx tsx tests/connection-status.test.ts
-npx tsx tests/routing-attempt-label.test.ts
+../server/node_modules/.bin/tsx tests/detail-load-state.test.ts
+../server/node_modules/.bin/tsx tests/routing-attempt-label.test.ts
+../server/node_modules/.bin/tsx tests/status-notice.test.ts
+../server/node_modules/.bin/tsx tests/connection-status.test.ts
 ```
 
-The client package does not define `npm test`. Run the three scripts above directly. `npx tsx` uses a local TypeScript runner; from this repository the server install provides `tsx`.
+`client/package.json` does not define `npm test` and does not depend on `tsx`. The commands above use the `tsx` binary installed with the server.
 
 ### Manual QA
 
@@ -251,6 +254,24 @@ The manual checklist covers operator workflows and frontend/backend integration.
 QA-01 through QA-08 are recorded as passed in [Manual QA Checklist](docs/QA_CHECKLIST.md). That file is the record of the manual evidence, including the limits noted for the no-response timing check and the duplicate-request check.
 
 Automated success is not treated as proof of complete end-to-end coverage.
+
+### Independent engineering QA
+
+[Independent QA Audit](docs/INDEPENDENT_QA_AUDIT.md) reviews Milestones 1–4. Its recommendation is **READY WITH LIMITATIONS** for this single-operator assessment.
+
+Fixed and verified:
+
+- Pending routing cards no longer reveal the stored simulation outcome, preselected contributor, or no-match result before the worker applies the attempt.
+- A failed task-detail request shows the error and **Try again** instead of remaining on “Loading task…”.
+- Malformed JSON returns HTTP 400, code `validation_error`, message `Request body must be valid JSON.`
+
+Accepted limitations, not represented as resolved:
+
+- Every HTTP 409 is shown as a task-version conflict, including `invalid_assignment` and `invalid_transition`.
+- After pre-work failure, the dashboard history does not show the earlier acceptance note. The note remains on the audit event.
+- An HTTP 500 response is presented as a connection failure.
+
+A read outside an open write transaction, and a poll request that never completes, are suspected risks. They were not reproduced as data corruption.
 
 ## Implementation Status
 
@@ -267,13 +288,14 @@ Automated success is not treated as proof of complete end-to-end coverage.
 
 TaskFlow was developed using AI coding agents for architectural review, implementation, debugging, and verification.
 
-Development was organized into focused milestones:
+Milestones 1–4 are implemented:
 
 1. Backend foundation and SQLite persistence
 2. Persisted automatic routing
 3. Human intervention and recovery
 4. Operator dashboard
-5. Engineering review and final verification
+
+Engineering review is recorded in `docs/QA_CHECKLIST.md` and `docs/INDEPENDENT_QA_AUDIT.md`.
 
 The workflow included reviewing proposed designs, identifying edge cases, correcting implementation assumptions, and validating changes through automated and manual checks.
 
@@ -297,9 +319,13 @@ The following tradeoffs are intentional:
 - **Single-process architecture:** The worker is not designed for distributed execution across multiple servers.
 - **SQLite persistence:** Provides local durability without requiring external database infrastructure.
 - **Optimistic concurrency:** Repeated mutations using stale task versions return HTTP 409 rather than replaying a prior success.
-- **Polling:** The dashboard polls during active routing, while other states update following operator actions or existing refresh activity.
+- **Polling:** Task data is reloaded while any task is `routing`, or while the connection is not current. After every task leaves `routing` and the connection is current, another client’s change is not pulled until a local action, a new routing task, or a reconnect.
+- **HTTP 409 copy:** The dashboard uses one conflict message for every HTTP 409, then refreshes. The backend still distinguishes `conflict`, `invalid_assignment`, and `invalid_transition`.
+- **HTTP 500 copy:** Status 0 and every status of 500 or higher are shown as “The server could not be reached.” A live HTTP 500 is therefore presented as a disconnect.
+- **History notes:** The history line shows the event label and contributor name. It does not show `details.responseNote`, so an acceptance note is not visible in the dashboard after a later pre-work failure overwrites the assignment note.
 - **Simple expertise matching:** No recommendation model or contributor-ranking algorithm.
 - **Explicit recovery:** Unresolved or unsuccessful routing does not automatically trigger retries.
+- **Open local API:** There is no authentication. CORS is open, and the server listens without binding to localhost only.
 - **Local-first deployment:** Production hosting and multi-tenant infrastructure are outside the assessment scope.
 
 These limitations are documented to distinguish the implemented guarantees from production features requiring additional infrastructure.

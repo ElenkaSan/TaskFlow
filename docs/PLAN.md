@@ -5,13 +5,16 @@
 TaskFlow is a small task-assignment system. A newly created task is routed to
 an eligible contributor by expertise. While automatic routing is pending, an
 operator may assign a contributor manually. Routing is deliberately simulated
-with a persisted delay of 5–20 seconds; twenty percent of attempts are
-persisted as no-response attempts.
+with a persisted delay of 5–20 seconds. When a contributor is selected,
+about twenty percent of those attempts are persisted as no-response. An
+attempt with no eligible contributor is stored as `outcome = success` and
+`selected_contributor_id = null`.
 
 The implementation stays deliberately small: React client, Express JSON API,
-SQLite, and client polling about every 1.5 seconds while any task is
-`routing`. There is no authentication, real queue, or websocket layer for this
-assessment.
+SQLite, and client polling about every 1.5 seconds. A poll reloads tasks while
+any task is `routing` or the connection is not current. Otherwise it calls
+`GET /api/health`. There is no authentication, real queue, or websocket layer
+for this assessment.
 
 ## Revised task state model
 
@@ -35,24 +38,31 @@ There is no completion workflow unless it is later requested.
 
 1. **Create task:** create `routing` with one persisted routing attempt and an
    audit event.
-2. **Automated result:** when a successful attempt becomes due, atomically make
-   an `offered` assignment only if the task remains `routing` and the attempt
-   remains pending.
+2. **Automated result:** when a successful attempt with a selected contributor
+   becomes due, atomically make an `offered` assignment only if the task
+   remains `routing` at the attempt's creation version and the attempt remains
+   pending. A successful attempt with no contributor is rule 3a, not an offer.
 3. **No response:** an attempt created with `outcome = no_response` and a
    selected contributor is not marked failed. At its persisted `warning_at`
    (25 seconds after creation), change the task from `routing` to
    `no_response_warning`, leave `completed_at` null, and write an audit event.
    It emits no error and does not self-retry. The operator may assign manually
-   or explicitly retry. While the attempt remains `pending`, the dashboard shows neutral waiting text and elapsed time. It does not display the stored outcome, the preselected contributor, or a no-match result.
+   or explicitly retry. While the attempt remains `pending`, the dashboard
+   shows “Awaiting routing response.” and elapsed time. It does not display
+   the stored outcome, the preselected contributor, a due time, or a warning
+   time. Those lines appear after the worker applies `completed` or
+   `no_response`. `superseded` and `cancelled` rows show no stored outcome.
 3a. **No match:** an attempt with no selected contributor becomes
    `recovery_required` when its `due_at` arrives. That outcome is `success`
    in storage because no silence was simulated. It is not a no-response warning.
 4. **Manual assignment:** from `routing`, `no_response_warning`,
    `offered`, `pre_work_failed`, or `recovery_required`, create an `offered`
-   assignment and cancel/supersede every active routing attempt.
+   assignment and supersede every pending routing attempt. The current
+   transitions write `superseded`. The check constraint also allows
+   `cancelled`, and no current transition writes that status.
 5. **Accept:** only the currently offered contributor may accept. Move to
-   `accepted`, set `accepted_at`, and cancel/supersede any residual active
-   routing attempts in the same transaction. No future automatic route is
+   `accepted`, set `accepted_at`, and supersede any residual pending routing
+   attempts in the same transaction. No future automatic route is
    permitted from `accepted`.
 6. **Decline:** only the currently offered contributor may decline. Record the
    decline, clear the active assignment, and move to `recovery_required`.
@@ -60,8 +70,10 @@ There is no completion workflow unless it is later requested.
    manual offer. The declined contributor is excluded from that retry.
 7. **Pre-work failure:** only an accepted contributor may report it. Move to
    `pre_work_failed`; the operator can explicitly retry routing or make a
-   manual offer. This preserves the original acceptance and failure in audit
-   history.
+   manual offer. The acceptance event and the failure event both remain in
+   `audit_events`, including the acceptance note in `details_json`. The
+   assignment row keeps only the latest `response_note`. The dashboard history
+   line shows the event label and contributor name, not that stored note.
 
 `routing` and `no_response_warning` are the only states that represent
 automatic routing activity. `no_response_warning` is intentionally unresolved,
@@ -70,7 +82,7 @@ not a failure state.
 ## SQLite schema
 
 All timestamps are UTC ISO-8601 text. SQLite foreign keys and WAL mode are
-enabled. JSON detail values are stored as text.
+enabled, with `busy_timeout = 5000`. JSON detail values are stored as text.
 
 ```sql
 CREATE TABLE contributors (
@@ -137,6 +149,8 @@ CREATE TABLE audit_events (
 CREATE INDEX routing_attempts_due_idx
   ON routing_attempts (status, due_at);
 CREATE INDEX assignments_task_idx ON assignments (task_id, offered_at);
+CREATE UNIQUE INDEX assignments_one_active_idx
+  ON assignments (task_id) WHERE status IN ('offered', 'accepted');
 CREATE INDEX audit_events_task_idx ON audit_events (task_id, created_at);
 ```
 
@@ -190,7 +204,7 @@ The implementation focuses on failures that could compromise assignment consiste
 | Concurrent operations create conflicting assignments | SQLite transactions and a partial unique index for active assignments | Concurrency and repeated-request tests |
 | A backend restart loses pending routing work | Persisted routing outcomes and timestamps, plus startup recovery sweeps | Restart and repeated-sweep tests |
 | A request without a response is incorrectly marked as failed | Separate unresolved warning state and explicit operator recovery | No-response routing tests |
-| A stale frontend action changes newer server state | Version-aware mutations returning HTTP 409 | API tests and browser conflict handling |
+| A stale frontend action changes newer server state | Version-aware mutations returning HTTP 409 `conflict` | API tests. The dashboard refreshes and shows one conflict sentence for every HTTP 409, including `invalid_assignment` and `invalid_transition` |
 | Routing fails to find an eligible contributor | Transition to `recovery_required` rather than an unresolved no-response warning | API and integration checks |
 
 The main design principle is to enforce assignment consistency in the backend rather than relying on frontend state or timing assumptions.
@@ -217,7 +231,12 @@ The following checks were executed successfully on November 7, 2026:
 - Backend API and intervention tests: `npm test` on Node.js 20.20.0 and 22.23.4
 - Frontend production build: `npm run build` on Node.js 20.20.0
 - Frontend lint: `npm run lint` on Node.js 20.20.0, with no diagnostic output
-- Frontend checks: `npx tsx tests/status-notice.test.ts`, `npx tsx tests/connection-status.test.ts`, and `npx tsx tests/routing-attempt-label.test.ts`
+- Frontend checks, using the `tsx` binary installed with the server, because `client/package.json` has no `npm test` script and no `tsx` dependency:
+  `../server/node_modules/.bin/tsx tests/detail-load-state.test.ts`,
+  `../server/node_modules/.bin/tsx tests/routing-attempt-label.test.ts`,
+  `../server/node_modules/.bin/tsx tests/status-notice.test.ts`, and
+  `../server/node_modules/.bin/tsx tests/connection-status.test.ts`
+  on Node.js 20.20.0
 - Git whitespace check: `git diff --check`
 
 The backend tests use Node.js assertions and report successful completion per script rather than a numerical test count.
@@ -233,5 +252,8 @@ During development and integration, several important adjustments were made:
 3. **Restart consistency:** Routing outcomes and due times are persisted instead of regenerated after a restart.
 4. **No-match handling:** Routing attempts with no eligible contributor transition to `recovery_required`, rather than incorrectly displaying a no-response warning.
 5. **Runtime compatibility:** The implementation uses `sqlite3` and was verified with Node.js 20.20.0 and 22.23.4.
+6. **Pending routing copy:** A pending attempt shows “Awaiting routing response.” and elapsed time. `client/tests/routing-attempt-label.test.ts` locks that text.
+7. **Detail loading:** A failed detail request for the selected task shows the error and Try again. A successful snapshot is not presented as the current detail after that request fails. `client/tests/detail-load-state.test.ts` locks the state rules.
+8. **Malformed JSON:** `entity.parse.failed` returns HTTP 400 `validation_error` and `Request body must be valid JSON.` Unexpected failures remain HTTP 500 with `An unexpected error occurred.` `server/tests/api.test.ts` covers the malformed body. The client still treats HTTP 500 as a connection failure.
 
 These changes were informed by architectural review, implementation feedback, and integration testing.

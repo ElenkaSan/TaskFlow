@@ -30,9 +30,10 @@ client/
 │   └── main.tsx               # React entry point
 │
 ├── tests/
+│   ├── detail-load-state.test.ts     # Loading, failed, and snapshot rules
+│   ├── routing-attempt-label.test.ts # Pending versus applied routing labels
 │   ├── status-notice.test.ts         # Routing status message checks
-│   ├── connection-status.test.ts     # API connection status checks
-│   └── routing-attempt-label.test.ts # Pending versus applied routing labels
+│   └── connection-status.test.ts     # API connection status checks
 │
 ├── public/                    # Static assets
 ├── index.html                 # HTML entry point
@@ -78,7 +79,7 @@ The interface distinguishes between:
 
 A delayed routing request is not incorrectly presented as a confirmed failure.
 
-While an attempt is pending, its card says “Awaiting routing response.” and shows elapsed time. It does not show the stored simulation outcome, the preselected contributor, or a no-match result. Those details appear after the worker applies the attempt.
+While an attempt is pending, its card says “Awaiting routing response.” and shows elapsed time, for example `Elapsed Just now` or `Elapsed 10m`. It does not show the stored simulation outcome, the preselected contributor, a due time, or a warning time. Those details appear after the worker applies the attempt (`completed` or `no_response`). Superseded and cancelled attempts do not display a stored outcome.
 
 ### Human Intervention
 
@@ -105,41 +106,60 @@ The backend remains the authoritative source of task and assignment state.
 
 ### Polling
 
-The dashboard polls approximately every 1.5 seconds while at least one task is in the `routing` state.
+The dashboard polls about every 1.5 seconds.
 
-Polling updates task information without discarding the currently selected task.
+- If any task is `routing`, or the connection is not current, the poll reloads the task list and the selected task’s details.
+- Otherwise it calls `GET /api/health`.
+- A poll does not start while another poll or an operator action is in flight.
+- Selecting a task is preserved across a successful refresh. If that task is no longer in the list, the selection is cleared.
 
-Other states are refreshed following operator actions or when existing polling activity retrieves newer data.
+After every task leaves `routing` and the badge is **Up to date**, a change made by another client is not pulled until a local action, a new routing task, or a reconnect. `fetch` has no timeout. A request that never completes would hold the poll lock until it settles. That case was not reproduced.
 
-### Optimistic Concurrency
+### Connection badge
+
+| State | Label |
+|---|---|
+| Current | Up to date |
+| Disconnected | Disconnected |
+| Reconnecting | Reconnecting |
+| Before the first result | No label |
+
+A failed poll or action moves the badge to **Disconnected**. The next poll shows **Reconnecting** while it retries. Success returns to **Up to date**.
+
+Status `0` and every status of `500` or higher are treated as connection failures. The action notice then says “The server could not be reached.” An HTTP 500 from a live server is therefore shown as a disconnect. That is a known limitation. HTTP 404 is not a connection failure.
+
+### Task details
+
+The detail pane has four states:
+
+- **Empty:** nothing is selected. The pane says to select a task.
+- **Loading:** a task is selected and there is no successful snapshot for it. The pane says “Loading task…”.
+- **Ready:** the selected task’s latest request succeeded. The pane shows that task.
+- **Failed:** the selected task’s latest request failed. The pane shows the error and **Try again**.
+
+**Try again** reloads that task’s details. It does not reload the whole page. If the task list itself fails to load, a separate **Try again** reloads the page.
+
+A successful snapshot stays on screen while the same task is refreshed. If that refresh fails, the snapshot is kept in memory and is not presented as the current detail. Switching to another task does not show the previous task as the new selection. A response for a task the operator is no longer viewing is ignored.
+
+### Optimistic concurrency and other errors
 
 Every state-changing request includes the task version last received from the backend.
 
-If another action has already changed that task, the backend returns:
-
-`HTTP 409 Conflict`
-
-The dashboard then:
+If the backend returns HTTP 409, the dashboard:
 
 1. Refreshes the latest task details.
-2. Displays a conflict message.
-3. Asks the operator to review the updated state before retrying.
+2. Shows “This task changed on the server. The latest state is shown below. Review it before trying again.”
+3. Does not repeat the mutation.
 
-The frontend does not automatically repeat a conflicting mutation.
+That same message is used for every HTTP 409, including `invalid_assignment` and `invalid_transition`, not only a stale version. The refresh is still appropriate. The copy is an accepted limitation.
 
-### Server-Confirmed Feedback
+Other failed actions show the server message. Success messages appear only after the backend confirms the operation.
 
-Success messages are displayed only after the backend confirms an operation.
+## Layout
 
-The interface also provides loading, validation, empty, and error states.
+The dashboard uses a two-column layout and switches to one column at a viewport width of `900px` or less (`client/src/index.css`).
 
-## Responsive Design
-
-The dashboard uses a two-column layout on larger screens and adapts to a single-column layout on narrow viewports.
-
-The interface was checked at a 390px-wide mobile viewport during development.
-
-The design prioritizes readable task information, clear status labels, accessible form controls, and straightforward operator actions over unnecessary visual complexity.
+The design prioritizes readable task information, clear status labels, accessible form controls, and straightforward operator actions.
 
 ## Local Development
 
@@ -190,28 +210,28 @@ Run lint checks:
 npm run lint
 ```
 
-Run the standalone frontend checks:
+Run the standalone frontend checks with the server’s `tsx` binary. `client/package.json` does not define `npm test` and does not depend on `tsx`.
 
 ```bash
-npx tsx tests/status-notice.test.ts
-npx tsx tests/connection-status.test.ts
-npx tsx tests/routing-attempt-label.test.ts
+../server/node_modules/.bin/tsx tests/detail-load-state.test.ts
+../server/node_modules/.bin/tsx tests/routing-attempt-label.test.ts
+../server/node_modules/.bin/tsx tests/status-notice.test.ts
+../server/node_modules/.bin/tsx tests/connection-status.test.ts
 ```
 
-The latest reported verification, on Node.js 20.20.0 on November 7, 2026, includes:
+On November 7, 2026, Node.js 20.20.0, those four scripts, `npm run lint`, and `npm run build` exited 0. Oxlint printed no diagnostics. The Vite production build completed.
 
 | Check | Result |
 |---|---|
 | TypeScript and Vite production build | Passed |
 | Oxlint | Passed, with no diagnostic output |
-| Connection status check | Passed |
-| Status notice check | Passed |
+| Detail-load state check | Passed |
 | Routing attempt label check | Passed |
+| Status notice check | Passed |
+| Connection status check | Passed |
 | Manual operator workflow testing | Recorded as passed in `docs/QA_CHECKLIST.md` |
 
-The standalone test scripts are not currently registered under an `npm test` command.
-
-Automated frontend checks do not replace browser-based end-to-end testing.
+These scripts test formatting and state helpers. They do not render `App.tsx`, so browser checks remain the record for polling, clicks, and API parsing.
 
 See the [Manual QA Checklist](../docs/QA_CHECKLIST.md) for scenario-level verification.
 
@@ -222,7 +242,10 @@ See the [Manual QA Checklist](../docs/QA_CHECKLIST.md) for scenario-level verifi
 - **Version-aware mutations:** Prevents stale frontend actions from silently overwriting newer decisions.
 - **Explicit operator actions:** Recovery is initiated by the operator rather than silently triggered by the interface.
 - **Simulated contributor responses:** The dashboard records accept, decline, and failure actions without contributor authentication.
-- **Limited background refresh:** Polling primarily operates during active routing; changes made externally in other task states may require another refresh or interaction.
+- **Limited background refresh:** After routing finishes and the connection is current, external changes are not polled until the next local action, routing task, or reconnect.
+- **One HTTP 409 message:** Business-rule conflicts use the same operator copy as a stale version.
+- **HTTP 500 as a disconnect:** A server error of status 500 or higher uses the connection-failure path.
+- **Acceptance note in history:** History shows the event label and contributor. It does not show the note stored on the audit event. After pre-work failure, the assignment card shows the latest note only.
 
 These tradeoffs reflect the project's focus on correctness, clarity, and maintainability within a time-boxed engineering assessment.
 
@@ -232,6 +255,7 @@ These tradeoffs reflect the project's focus on correctness, clarity, and maintai
 - [Backend Documentation](../server/README.md) — REST API, persistence, and state transitions
 - [Engineering Plan](../docs/PLAN.md) — Architecture and implementation decisions
 - [Manual QA Checklist](../docs/QA_CHECKLIST.md) — Test scenarios and results
+- [Independent QA Audit](../docs/INDEPENDENT_QA_AUDIT.md) — READY WITH LIMITATIONS
 
 ---
 
