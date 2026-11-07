@@ -166,3 +166,25 @@ export function outcomeLabel(outcome: string, contributor: string | null): strin
   if (outcome === 'no_response') return `No response from ${contributor}. This is not a failure.`
   return `Match saved for ${contributor}.`
 }
+
+export const pendingRoutingText = 'Awaiting routing response.'
+
+export function routingAttemptLines(
+  attempt: {
+    status: string
+    outcome: string
+    dueAt: string
+    warningAt: string | null
+    createdAt: string
+  },
+  contributor: string | null,
+  now: number,
+): string[] {
+  if (attempt.status === 'pending') {
+    return [pendingRoutingText, `Elapsed ${ageLabel(attempt.createdAt, now)}`]
+  }
+  if (attempt.status !== 'completed' && attempt.status !== 'no_response') return []
+  const lines = [outcomeLabel(attempt.outcome, contributor), `Due ${timeLabel(attempt.dueAt)}`]
+  if (attempt.status === 'no_response' && attempt.warningAt) lines.push(`Warning ${timeLabel(attempt.warningAt)}`)
+  return lines
+}

@@ -16,4 +16,4 @@ data/*.sqlite-shm
 data/*.sqlite-wal
 
 # macOS
-.DS_Store
+.DS_Storedata/*.sqlite-journal

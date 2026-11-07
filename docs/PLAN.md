@@ -22,7 +22,7 @@ stored separately so that an assignment is never mistaken for acceptance.
 | --- | --- | --- |
 | `routing` | An automatic routing attempt is pending, or routing was explicitly retried. A human may manually assign when someone is eligible. | `offered`, `no_response_warning`, `recovery_required` |
 | `no_response_warning` | The current automated attempt was intentionally simulated to never respond. It remains unresolved; the UI shows a delayed operator warning. | `offered` (manual assignment), `routing` (explicit retry) |
-| `offered` | A contributor has been selected, by automation or a human, and has not yet responded. | `accepted`, `routing`, `recovery_required` |
+| `offered` | A contributor has been selected, by automation or a human, and has not yet responded. Replacing the offer stays `offered`. | `accepted`, `recovery_required` |
 | `accepted` | The contributor explicitly accepted. Automatic routing is permanently stopped for this task. | `pre_work_failed` |
 | `pre_work_failed` | The accepted contributor failed before work began. The operator can start recovery. | `routing`, `offered` |
 | `recovery_required` | The offered contributor declined or routing cannot make a valid offer. A human needs to choose the next action. | `routing`, `offered` |
@@ -43,7 +43,7 @@ There is no completion workflow unless it is later requested.
    (25 seconds after creation), change the task from `routing` to
    `no_response_warning`, leave `completed_at` null, and write an audit event.
    It emits no error and does not self-retry. The operator may assign manually
-   or explicitly retry.
+   or explicitly retry. While the attempt remains `pending`, the dashboard shows neutral waiting text and elapsed time. It does not display the stored outcome, the preselected contributor, or a no-match result.
 3a. **No match:** an attempt with no selected contributor becomes
    `recovery_required` when its `due_at` arrives. That outcome is `success`
    in storage because no silence was simulated. It is not a no-response warning.
@@ -140,10 +140,12 @@ CREATE INDEX assignments_task_idx ON assignments (task_id, offered_at);
 CREATE INDEX audit_events_task_idx ON audit_events (task_id, created_at);
 ```
 
-`active_assignment_id` should have a foreign-key constraint added after the
-`assignments` table is created (or be validated by the transition service).
-For a minimal first migration, validating it transactionally in application
-code is acceptable.
+### Schema Integrity
+
+Assignment consistency is enforced through transactional state transitions, task-version checks, and a partial unique index that prevents multiple active offers or accepted assignments for the same task.
+
+The schema above documents the intended data model. The executable database initialization in `server/src/database.ts` is the authoritative source for the implemented schema and constraints.
+For a minimal first migration, validating it transactionally in application code is acceptable.
 
 ## Persisted routing and concurrency guarantees
 
@@ -178,14 +180,58 @@ useful, and cannot overwrite a human decision or acceptance.
 4. **Expertise matching:** one normalized expertise tag, matched exactly.
    There are no proficiency levels or capacity limits.
 
-## Implementation order
+## Engineering Risks and Mitigations
 
-These steps are implemented:
+The implementation focuses on failures that could compromise assignment consistency.
 
-1. Add server runtime/configuration, migrations, seed contributors, and task
-   read/create APIs.
-2. Build the routing-attempt scheduler and startup recovery sweep.
-3. Add offers plus accept, decline, pre-work failure, manual intervention, and
-   audit APIs with integration tests for races and restarts.
-4. Replace the Vite demo with creation, task-detail, actions, warning, and
-   audit UI using polling.
+| Risk | Mitigation | Verification |
+|---|---|---|
+| A delayed automated result overwrites a human assignment | Transactional task-version checks and routing supersession | Integration tests for late results and manual overrides |
+| Concurrent operations create conflicting assignments | SQLite transactions and a partial unique index for active assignments | Concurrency and repeated-request tests |
+| A backend restart loses pending routing work | Persisted routing outcomes and timestamps, plus startup recovery sweeps | Restart and repeated-sweep tests |
+| A request without a response is incorrectly marked as failed | Separate unresolved warning state and explicit operator recovery | No-response routing tests |
+| A stale frontend action changes newer server state | Version-aware mutations returning HTTP 409 | API tests and browser conflict handling |
+| Routing fails to find an eligible contributor | Transition to `recovery_required` rather than an unresolved no-response warning | API and integration checks |
+
+The main design principle is to enforce assignment consistency in the backend rather than relying on frontend state or timing assumptions.
+
+These safeguards are intended for the implemented single-process architecture; they are not guarantees of distributed-system behavior.
+
+## Implementation Milestones & Verification
+
+Development was organized into small, independently reviewable milestones.
+
+| Milestone | Deliverable | Status |
+|---|---|---|
+| 1. Backend foundation | Express API, SQLite persistence, task creation, contributor seed data, audit records | Implemented |
+| 2. Automatic routing | Persisted routing attempts, simulated delays, no-response handling, startup recovery | Implemented |
+| 3. Human intervention | Manual overrides, acceptance, decline, pre-work failure, explicit recovery | Implemented |
+| 4. Operator dashboard | React UI, task actions, polling, audit timeline, HTTP 409 handling | Implemented |
+| 5. Verification and handoff | Automated checks, manual QA, documentation, walkthrough preparation | Ready for final commit |
+
+### Verification Performed
+
+The following checks were executed successfully on November 7, 2026:
+
+- Backend TypeScript: `npm run typecheck` on Node.js 20.20.0 and 22.23.4
+- Backend API and intervention tests: `npm test` on Node.js 20.20.0 and 22.23.4
+- Frontend production build: `npm run build` on Node.js 20.20.0
+- Frontend lint: `npm run lint` on Node.js 20.20.0, with no diagnostic output
+- Frontend checks: `npx tsx tests/status-notice.test.ts`, `npx tsx tests/connection-status.test.ts`, and `npx tsx tests/routing-attempt-label.test.ts`
+- Git whitespace check: `git diff --check`
+
+The backend tests use Node.js assertions and report successful completion per script rather than a numerical test count.
+
+Manual end-to-end results are maintained separately in [QA_CHECKLIST.md](QA_CHECKLIST.md). Automated checks are not presented as a substitute for browser-based verification.
+
+### Implementation Corrections
+
+During development and integration, several important adjustments were made:
+
+1. **No-response semantics:** Unresolved routing attempts remain distinct from confirmed failures.
+2. **Assignment acceptance:** Offers and accepted assignments use separate lifecycle states.
+3. **Restart consistency:** Routing outcomes and due times are persisted instead of regenerated after a restart.
+4. **No-match handling:** Routing attempts with no eligible contributor transition to `recovery_required`, rather than incorrectly displaying a no-response warning.
+5. **Runtime compatibility:** The implementation uses `sqlite3` and was verified with Node.js 20.20.0 and 22.23.4.
+
+These changes were informed by architectural review, implementation feedback, and integration testing.

@@ -23,7 +23,7 @@ import {
   isConnectionFailure,
   manualAssignmentUnavailable,
   nextConnection,
-  outcomeLabel,
+  routingAttemptLines,
   statusNotice,
   sourceLabel,
   statusLabel,
@@ -396,9 +396,11 @@ export default function App() {
                 {current.routingAttempts.map((attempt) => (
                   <li key={attempt.id} className="card">
                     <strong>{attemptLabel(attempt.status)}</strong>
-                    <span>{outcomeLabel(attempt.outcome, attempt.selectedContributorId ? names[attempt.selectedContributorId] ?? attempt.selectedContributorId : null)}</span>
-                    <span>Due {timeLabel(attempt.dueAt)}</span>
-                    {attempt.warningAt && <span>Warning {timeLabel(attempt.warningAt)}</span>}
+                    {routingAttemptLines(
+                      attempt,
+                      attempt.selectedContributorId ? names[attempt.selectedContributorId] ?? attempt.selectedContributorId : null,
+                      now,
+                    ).map((line, index) => <span key={`${attempt.id}-${index}`}>{line}</span>)}
                   </li>
                 ))}
               </ul>

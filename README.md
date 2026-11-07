@@ -91,6 +91,7 @@ taskflow-assignment/
 ├── docs/
 │   ├── PLAN.md                      # Architecture and engineering decisions
 │   ├── QA_CHECKLIST.md              # Manual verification results
+│   ├── INDEPENDENT_QA_AUDIT.md      # Independent engineering audit
 │   └── DEMO.md                      # Demonstration walkthrough
 │
 ├── data/                             # Local SQLite data (gitignored)
@@ -123,6 +124,8 @@ Task version checks and SQLite transactions ensure that a delayed routing respon
 Approximately 20% of simulated routing requests never respond.
 
 After 25 seconds, the system displays a warning without falsely classifying the request as a confirmed failure.
+
+While an attempt is still pending, the dashboard shows a neutral waiting state and elapsed time. It does not reveal whether that attempt will return, which contributor was preselected, or that nobody matched. Those outcomes appear only after the worker applies the result.
 
 The operator can intervene or explicitly retry.
 
@@ -209,10 +212,12 @@ TaskFlow combines automated API checks, integration testing, and manual end-to-e
 | API and automatic routing tests | Passed |
 | Human intervention integration tests | Passed |
 | Frontend build and lint | Passed |
-| Frontend status-notice check | Passed - manually executed |
-| Manual end-to-end QA | Partially completed |
+| Frontend status-notice check | Passed |
+| Frontend connection-status check | Passed |
+| Frontend routing-attempt label check | Passed |
+| Manual end-to-end QA | Recorded in `docs/QA_CHECKLIST.md` |
 
-Frontend build, lint, connection-status checks, backend typecheck, and backend API/integration tests were executed successfully on November 7, 2026. Manual end-to-end QA is tracked separately and remains partially complete.
+Frontend build, lint, and the three standalone client checks were executed successfully on November 7, 2026 on Node.js 20.20.0. Backend typecheck and API/integration tests passed on Node.js 20.20.0 and 22.23.4. Manual scenarios QA-01 through QA-08 are recorded in the checklist. The checklist keeps its own notes: QA-06 did not time the 25-second warning during that manual session, and QA-08 repeated one request rather than issuing simultaneous writes.
 
 ### Backend
 
@@ -232,17 +237,18 @@ From the `client` directory:
 ```bash
 npm run build
 npm run lint
+npx tsx tests/status-notice.test.ts
+npx tsx tests/connection-status.test.ts
+npx tsx tests/routing-attempt-label.test.ts
 ```
 
-Additional standalone frontend checks are maintained in `client/tests/`.
+The client package does not define `npm test`. Run the three scripts above directly. `npx tsx` uses a local TypeScript runner; from this repository the server install provides `tsx`.
 
 ### Manual QA
 
 The manual checklist covers operator workflows and frontend/backend integration.
 
-Some scenarios remain open, including full verification of decline, pre-work failure, no-response warnings, restart behavior, and duplicate prevention through the UI.
-
-See [Manual QA Checklist](docs/QA_CHECKLIST.md) for recorded results.
+QA-01 through QA-08 are recorded as passed in [Manual QA Checklist](docs/QA_CHECKLIST.md). That file is the record of the manual evidence, including the limits noted for the no-response timing check and the duplicate-request check.
 
 Automated success is not treated as proof of complete end-to-end coverage.
 
@@ -255,7 +261,7 @@ Automated success is not treated as proof of complete end-to-end coverage.
 | Human intervention and assignment recovery | Implemented |
 | React operator dashboard | Implemented |
 | Automated backend and frontend checks | Passed in reported runs |
-| Final manual end-to-end QA | Partially completed |
+| Final manual end-to-end QA | Recorded in `docs/QA_CHECKLIST.md` |
 
 ## AI-Assisted Engineering Workflow
 
@@ -304,6 +310,7 @@ These limitations are documented to distinguish the implemented guarantees from 
 - [Backend API & Architecture](server/README.md)
 - [Engineering Plan](docs/PLAN.md)
 - [Manual QA Checklist](docs/QA_CHECKLIST.md)
+- [Independent QA Audit](docs/INDEPENDENT_QA_AUDIT.md)
 - [Demo Walkthrough](docs/DEMO.md)
 
 ---

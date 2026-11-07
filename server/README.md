@@ -240,9 +240,7 @@ Repeated worker sweeps, including processing after restart, must not create dupl
 
 ## Persistence and Audit History
 
-The default local database location is:
-
-`data/taskflow.sqlite`
+The default database path is `../data/taskflow.sqlite`, resolved from the server directory. That is `data/taskflow.sqlite` at the repository root. Set `DATABASE_PATH` to override it. The example is in `.env.example`.
 
 SQLite configuration includes:
 
@@ -257,6 +255,7 @@ Meaningful actions are recorded through append-only audit events.
 
 Events include:
 
+- `task_created`
 - `routing_offer_created`
 - `routing_no_eligible_contributor`
 - `routing_no_response_warning`
@@ -333,8 +332,8 @@ These automated results do not replace manual end-to-end UI verification.
 | Version-based concurrency protection | Implemented |
 | Append-only audit history | Implemented |
 | Backend integration tests | Passed in reported runs |
-| React operator dashboard | In progress |
-| Final manual end-to-end verification | Pending |
+| React operator dashboard | Implemented |
+| Final manual end-to-end verification | Recorded in `docs/QA_CHECKLIST.md` |
 
 ## Engineering Tradeoffs
 
