@@ -20,7 +20,10 @@ import {
   attemptLabel,
   auditText,
   connectionLabel,
+  detailView,
   isConnectionFailure,
+  phaseWhileLoadingDetail,
+  settleDetailRequest,
   manualAssignmentUnavailable,
   nextConnection,
   routingAttemptLines,
@@ -29,6 +32,8 @@ import {
   statusLabel,
   timeLabel,
   type ConnectionPhase,
+  type DetailLoad,
+  type DetailPhase,
 } from './format.ts'
 
 const statuses = [
@@ -46,6 +51,9 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<TaskDetail | null>(null)
+  const [detailPhase, setDetailPhase] = useState<DetailPhase>('idle')
+  const [detailFailedId, setDetailFailedId] = useState<string | null>(null)
+  const [detailError, setDetailError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [connection, setConnection] = useState<ConnectionPhase>('pending')
@@ -62,6 +70,9 @@ export default function App() {
   const selectedIdRef = useRef<string | null>(null)
   const busyRef = useRef(false)
   const detailRequest = useRef(0)
+  const detailPhaseRef = useRef<DetailPhase>('idle')
+  const detailIdRef = useRef<string | null>(null)
+  const detailFailedRef = useRef<string | null>(null)
   const connectionRef = useRef<ConnectionPhase>('pending')
   const monitorLock = useRef(false)
 
@@ -83,12 +94,53 @@ export default function App() {
     setNotice(null)
   }
 
-  async function refreshDetail(taskId: string): Promise<void> {
+  function applyDetailPhase(phase: DetailPhase, loadedId: string | null, failedId: string | null): void {
+    detailPhaseRef.current = phase
+    detailIdRef.current = loadedId
+    detailFailedRef.current = failedId
+    setDetailPhase(phase)
+    setDetailFailedId(failedId)
+  }
+
+  function loadDetail(taskId: string): Promise<void> {
     const requestId = ++detailRequest.current
-    const next = await getTask(taskId)
-    if (requestId !== detailRequest.current || selectedIdRef.current !== taskId) return
-    setDetail(next)
-    rememberNames(next.eligibleContributors, next.assignments)
+    const nextPhase = phaseWhileLoadingDetail(
+      detailPhaseRef.current,
+      detailIdRef.current,
+      detailFailedRef.current,
+      taskId,
+    )
+    detailPhaseRef.current = nextPhase
+    setDetailPhase(nextPhase)
+    if (nextPhase === 'ready') {
+      detailFailedRef.current = null
+      setDetailFailedId(null)
+    }
+    if (nextPhase !== 'failed') setDetailError(null)
+    return getTask(taskId).then((next) => {
+      const settled = settleDetailRequest(detailSnapshot(), { requestId, taskId, selectedId: selectedIdRef.current, ok: true })
+      if (!settled) return
+      applyDetailPhase(settled.phase, settled.loadedTaskId, settled.failedTaskId)
+      setDetail(next)
+      setDetailError(null)
+      rememberNames(next.eligibleContributors, next.assignments)
+    }).catch((error: unknown) => {
+      const settled = settleDetailRequest(detailSnapshot(), { requestId, taskId, selectedId: selectedIdRef.current, ok: false })
+      if (!settled) return
+      applyDetailPhase(settled.phase, settled.loadedTaskId, settled.failedTaskId)
+      setDetailError(error instanceof Error && error.message ? error.message : 'Task details could not be loaded.')
+      if (lostConnection(error)) reportConnection('failure')
+      throw error
+    })
+  }
+
+  function detailSnapshot(): DetailLoad {
+    return {
+      phase: detailPhaseRef.current,
+      loadedTaskId: detailIdRef.current,
+      failedTaskId: detailFailedRef.current,
+      requestId: detailRequest.current,
+    }
   }
 
   function rememberNames(contributors: Contributor[], assignments: Assignment[]): void {
@@ -108,10 +160,12 @@ export default function App() {
     const list = await listTasks()
     setTasks(list)
     setNow(Date.now())
-    if (taskId && list.some((task) => task.id === taskId)) await refreshDetail(taskId)
+    if (taskId && list.some((task) => task.id === taskId)) await loadDetail(taskId)
     else if (taskId && selectedIdRef.current === taskId) {
       selectedIdRef.current = null
       setDetail(null)
+      applyDetailPhase('idle', null, null)
+      setDetailError(null)
       setSelectedId(null)
     }
   }
@@ -140,16 +194,7 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedId) return
-    let cancel = false
-    const requestId = ++detailRequest.current
-    void getTask(selectedId).then((next) => {
-      if (cancel || requestId !== detailRequest.current) return
-      setDetail(next)
-      rememberNames(next.eligibleContributors, next.assignments)
-    }).catch((error: unknown) => {
-      if (!cancel && lostConnection(error)) reportConnection('failure')
-    })
-    return () => { cancel = true }
+    void loadDetail(selectedId).catch(() => undefined)
   }, [selectedId])
 
   useEffect(() => {
@@ -257,7 +302,8 @@ export default function App() {
     })
   }
 
-  const current = detail && detail.task.id === selectedId ? detail : null
+  const view = detailView(selectedId, detailPhase, detail?.task.id ?? null, detailFailedId)
+  const current = view === 'ready' && detail?.task.id === selectedId ? detail : null
   const activeAssignment = current?.assignments.find((assignment) => assignment.id === current.task.activeAssignmentId) ?? null
   const pendingAttempt = current?.routingAttempts.some((attempt) => attempt.status === 'pending') ?? false
   const status = current?.task.status ?? ''
@@ -358,7 +404,14 @@ export default function App() {
         </div>
 
         <section className="panel detail" aria-live="polite">
-          {!current && <p className="empty">{selectedId ? 'Loading task…' : 'Select a task to see its assignment and history.'}</p>}
+          {view === 'empty' && <p className="empty">Select a task to see its assignment and history.</p>}
+          {view === 'loading' && <p className="empty">Loading task…</p>}
+          {view === 'failed' && (
+            <div className="empty">
+              <p>{detailError ?? 'Task details could not be loaded.'}</p>
+              <button type="button" onClick={() => { if (selectedId) void loadDetail(selectedId).catch(() => undefined) }}>Try again</button>
+            </div>
+          )}
           {current && (
             <>
               <div className="detail-heading">

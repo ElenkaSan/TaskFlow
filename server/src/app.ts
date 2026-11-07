@@ -273,11 +273,20 @@ export function createApp(db: SqliteDatabase) {
   );
   app.use(
     (
-      error: ApiError,
+      error: ApiError & { type?: string },
       _request: Request,
       response: Response,
       _next: NextFunction,
     ) => {
+      if (error.type === "entity.parse.failed") {
+        response.status(400).json({
+          error: {
+            code: "validation_error",
+            message: "Request body must be valid JSON.",
+          },
+        });
+        return;
+      }
       const status = error.status ?? 500;
       if (status >= 500) console.error(error);
       response

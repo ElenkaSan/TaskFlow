@@ -13,6 +13,37 @@ const app = createApp(db)
 
 type ApiResponse = { status: number; body: unknown }
 
+function callRaw(
+  port: number,
+  method: 'GET' | 'POST',
+  path: string,
+  payload: string,
+): Promise<ApiResponse> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      host: '127.0.0.1',
+      port,
+      path,
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    }, (response) => {
+      let responseBody = ''
+      response.setEncoding('utf8')
+      response.on('data', (chunk: string) => { responseBody += chunk })
+      response.on('end', () => resolve({
+        status: response.statusCode ?? 0,
+        body: JSON.parse(responseBody),
+      }))
+    })
+    request.on('error', reject)
+    request.write(payload)
+    request.end()
+  })
+}
+
 function callApi(
   port: number,
   method: 'GET' | 'POST',
@@ -139,6 +170,16 @@ try {
   const invalidTask = await callApi(port, 'POST', '/api/tasks', { title: '   ' })
   assert.equal(invalidTask.status, 400)
   assert.equal((invalidTask.body as { error: { code: string } }).error.code, 'validation_error')
+
+  const malformed = await callRaw(port, 'POST', '/api/tasks', '{')
+  assert.equal(malformed.status, 400)
+  const malformedError = (malformed.body as { error: { code: string; message: string; details?: unknown } }).error
+  assert.equal(malformedError.code, 'validation_error')
+  assert.equal(malformedError.message, 'Request body must be valid JSON.')
+  assert.equal(malformedError.details, undefined)
+  assert.equal(malformedError.message.includes('Expected property'), false)
+  assert.equal(malformedError.message.includes('position'), false)
+  assert.equal(malformedError.message.includes('{'), false)
 
   const created = await callApi(port, 'POST', '/api/tasks', {
     title: 'Fix dashboard filters',

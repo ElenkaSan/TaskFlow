@@ -19,6 +19,8 @@ One medium defect is confirmed: the dashboard describes a routing attempt’s st
 
 Several low defects remain: error copy, detail-load failures, and audit-note display. Frontend checks exercise formatting helpers, not the React dashboard component.
 
+**Remediation 2026-11-07, later the same day:** The detail-load failure and the malformed-JSON classification were corrected. The original write-ups in section 4 are unchanged. A failed detail request for the selected task now shows the error and Try again. A successful snapshot stays available for that task only while its latest request has not failed, and it is not shown for a different selection. Malformed JSON is HTTP 400 `validation_error` with `Request body must be valid JSON.` Unexpected failures still use HTTP 500 and `An unexpected error occurred.` The client still treats HTTP 500 as a connection failure; that part of the finding was not changed. Coverage is `client/tests/detail-load-state.test.ts` and the malformed-body case in `server/tests/api.test.ts`.
+
 The developer’s live SQLite database was opened read-only and was not modified. It contained no duplicate active assignments and no dangling `active_assignment_id`.
 
 ## 2. Scope and methodology
@@ -76,7 +78,7 @@ All of these used a fresh database, not `data/taskflow.sqlite`.
 - Wrong-contributor pre-work failure returned HTTP 409 `invalid_assignment` and left the task `accepted`.
 - 25 concurrent manual-assign versus due-worker races: 24 human wins (HTTP 201, surviving source `human`), 1 automation win (HTTP 409, surviving source `automation`), 0 inconsistent rows. Each task ended `offered`, with one active assignment and no pending attempt.
 - 20 concurrent decline versus replace races: 0 inconsistent results. The winner was either decline (`recovery_required`, no active assignment, replace HTTP 409) or replace (`offered`, the new row active, decline HTTP 409).
-- Malformed JSON `POST /api/tasks` with body `{` returned HTTP 400, code `internal_error`, message `Expected property name or '}' in JSON at position 1`.
+- Malformed JSON `POST /api/tasks` with body `{` returned HTTP 400, code `internal_error`, message `Expected property name or '}' in JSON at position 1`. A later check, after the handler change recorded in section 4, returned HTTP 400, code `validation_error`, message `Request body must be valid JSON.` The response did not include the parser text.
 - After pre-work failure, the assignment `responseNote` was the failure note. The acceptance note remained on the `assignment_accepted` audit event. `acceptedAt` was still set. The following retry returned `acceptedAt: null` and a snake_case `routingAttempt`.
 
 ## 4. Confirmed defects
@@ -153,6 +155,30 @@ The other findings in this report were not part of this change. The recommendati
 
 **Recommended fix:** If the in-flight detail request fails and is still the current request, store an error for that task id and render it instead of the loading sentence.
 
+#### Remediation note — 2026-11-07
+
+The finding above is unchanged. The client now keeps a detail phase of `idle`, `loading`, `ready`, or `failed`.
+
+- A selected task with no successful snapshot shows “Loading task…”.
+- A failed request for the selected task shows the error and Try again. The last snapshot for that task is kept in memory and is not rendered as the current detail.
+- A refresh of a task that already loaded successfully keeps that snapshot on screen until the new request settles. A newer request, or a response for a task the operator is no longer viewing, does not replace it.
+- Polling and the connection badge are unchanged. HTTP 404 leaves the badge on “Up to date”. A connection failure still moves the badge through the existing disconnected and reconnecting states.
+
+`detailView`, `phaseWhileLoadingDetail`, and `settleDetailRequest` in `client/src/format.ts` are what `client/src/App.tsx` uses. `client/tests/detail-load-state.test.ts` locks those transitions.
+
+Verification on 2026-11-07, Node.js v20.20.0, from `client`:
+
+| Command | Result |
+| --- | --- |
+| `tsx tests/detail-load-state.test.ts` | Exit 0. `Detail load state checks passed.` |
+| `tsx tests/routing-attempt-label.test.ts` | Exit 0. `Routing attempt label checks passed.` |
+| `tsx tests/status-notice.test.ts` | Exit 0. `Status notice checks passed.` |
+| `tsx tests/connection-status.test.ts` | Exit 0. `Connection status checks passed.` |
+| `npm run lint` | Exit 0. No diagnostic output |
+| `npm run build` | Exit 0. Vite production build completed in 148ms |
+
+A temporary API on port 3012 used `/tmp/taskflow-detail-ui/taskflow.sqlite`, and Vite on port 5175 proxied `/api` there. `data/taskflow.sqlite` and the existing listeners on ports 3001 and 5173 were not used. After a successful load, detail requests were forced to HTTP 404. The pane showed `Task not found.` and Try again. It did not keep the previous task’s assignment panel, and it did not remain on “Loading task…”. The connection badge stayed `Up to date`. Try again then rendered `First isolated task`. Selecting the other task rendered `Second isolated task`. Both temporary processes were stopped afterward.
+
 ### Low — Server and client disagree about what a failed request means
 
 **Evidence:**
@@ -165,6 +191,21 @@ The other findings in this report were not part of this change. The recommendati
 **Actual:** Parser failures are labeled `internal_error`. HTTP 500 is shown as a disconnect, and the connection badge leaves “Up to date”.
 
 **Recommended fix:** Map JSON parse errors to 400 `validation_error`. In the client, treat only `status === 0` (and, if desired, 502/503/504) as connectivity loss.
+
+#### Remediation note — 2026-11-07
+
+The finding above is unchanged. The JSON half was corrected. `entity.parse.failed` now returns HTTP 400 `validation_error` and `Request body must be valid JSON.` The parser message and request body are not returned or logged. Any other error still uses its status, or HTTP 500 when it has none, and a status of 500 or higher still logs the exception and returns `An unexpected error occurred.`
+
+The client half was not changed. `isConnectionFailure` still treats status 0 and every status of 500 or higher as a connection failure.
+
+`server/tests/api.test.ts` posts `{` to `POST /api/tasks` and expects the stable validation message. On 2026-11-07, Node.js v20.20.0, from `server`:
+
+| Command | Result |
+| --- | --- |
+| `npm run typecheck` | Exit 0 |
+| `npm test` | Exit 0. `API and routing tests passed.` then `Intervention tests passed.` |
+
+The same `{` body against the temporary API on port 3012 returned HTTP 400 and `{"error":{"code":"validation_error","message":"Request body must be valid JSON."}}`. No separate request was sent to force an unexpected HTTP 500 in this pass. The generic 500 branch was left as it was.
 
 ### Low — The acceptance note disappears from the operator UI after pre-work failure
 
@@ -206,6 +247,8 @@ That matches the documented limitation. It is not safe to expose this process be
 
 SQL predicates in the reviewed routes use bound parameters. HTTP 500 responses hide the internal message and log it on the server. The malformed-JSON path is the exception noted above: the parser text is returned to the client.
 
+**Follow-up 2026-11-07:** That exception was removed with the validation mapping in section 4. Parser text is no longer returned. HTTP 500 responses still hide the internal message.
+
 ## 6. Remaining risks and coverage limitations
 
 These were not observed as durable data corruption.
@@ -244,6 +287,49 @@ Areas inspected and not found defective: create-task normalization; manual assig
 
 **Documentation follow-up 2026-11-07:** The status sentences in the first three bullets were corrected in the root README, `server/README.md`, `client/README.md`, and `docs/PLAN.md`. Those bullets remain as the audit’s original findings. `task_created` was added to the server README event list. Routing-attempt JSON remains snake_case, as that README already says. `docs/QA_CHECKLIST.md` was not modified. The pending-routing-label remediation in section 4 is unchanged.
 
+## Low-Severity Findings — Final Disposition
+
+The independent engineering review identified four low-severity findings. Each was evaluated based on operator impact, correctness risk, and the assessment's time constraints.
+
+| Finding | Final disposition | Rationale |
+|---|---|---|
+| Task details could remain in a loading state after a failed request | **Fixed and verified** | The UI now displays an error and a retry action instead of remaining indefinitely in a loading state. |
+| Malformed JSON classified as an internal server error | **Fixed and verified** | Malformed request bodies now return HTTP 400 with a stable `validation_error` response and no internal parser details. |
+| Generic conflict message for all HTTP 409 responses | **Accepted limitation** | The backend correctly rejects conflicting operations. The remaining issue concerns the specificity of the operator-facing message. |
+| Acceptance note not displayed after pre-work failure | **Accepted limitation** | The acceptance event and its note remain in the audit data, but the dashboard does not display the earlier acceptance comment. |
+
+### Verification of Corrections
+
+The two corrections were verified on November 7, 2026.
+
+**Frontend:**
+- Detail-load state regression test — passed
+- Routing-label regression test — passed
+- Status-notice and connection-status tests — passed
+- TypeScript production build — passed
+- Oxlint — passed
+
+**Backend:**
+- TypeScript typecheck — passed
+- API and intervention tests — passed
+- Malformed JSON request returned HTTP 400 `validation_error`
+
+The routing state machine, assignment transitions, and SQLite schema were not modified.
+
+### Engineering Tradeoff
+
+I prioritized corrections that improve error handling and operator clarity without expanding the product scope or changing the validated assignment state machine.
+
+The remaining low-severity presentation limitations were consciously deferred because the core assignment integrity guarantees remain intact.
+
+An additional known limitation is that HTTP 500 responses are currently presented as connectivity failures in the frontend.
+
+These limitations are documented for future improvement rather than concealed or represented as resolved.
+
+**Final assessment recommendation: READY WITH LIMITATIONS.**
+
+TaskFlow is an assessment-scale implementation and is not intended to be presented as a production-ready service.
+
 ## 8. Final recommendation
 
 **READY WITH LIMITATIONS**
@@ -257,3 +343,5 @@ Do not describe the system as production-ready. It has no authentication, binds 
 No application fix was made. Fixes should wait for approval. The smallest useful code change is the pending-attempt label in `client/src/format.ts`. The other confirmed items are copy, error mapping, and documentation updates.
 
 That closing instruction is the audit’s original stop point. The pending-label change was made afterward and is recorded in section 4. The documentation consistency pass did not change application code again.
+
+**Follow-up 2026-11-07:** The detail-load and malformed-JSON corrections are recorded in section 4. Routing logic, assignment transitions, and the SQLite schema were not changed. The remaining low items include every HTTP 409 being described as a version conflict, HTTP 500 being shown as a disconnect, and the acceptance note disappearing from the history line. The recommendation remains **READY WITH LIMITATIONS**. Root README limitations were left as written: they describe assessment scope, not these two defects.

@@ -98,6 +98,51 @@ export function auditText(event: AuditEvent, contributors: Contributor[]): strin
   return `${label} · ${contributorName(contributors, contributorId)}`
 }
 
+export type DetailPhase = 'idle' | 'loading' | 'ready' | 'failed'
+
+export type DetailView = 'empty' | 'loading' | 'failed' | 'ready'
+
+export function phaseWhileLoadingDetail(
+  phase: DetailPhase,
+  loadedTaskId: string | null,
+  failedTaskId: string | null,
+  taskId: string,
+): DetailPhase {
+  if (failedTaskId === taskId) return 'failed'
+  if (loadedTaskId === taskId && phase !== 'loading') return 'ready'
+  return 'loading'
+}
+
+export function detailView(
+  selectedId: string | null,
+  phase: DetailPhase,
+  loadedTaskId: string | null,
+  failedTaskId: string | null,
+): DetailView {
+  if (!selectedId) return 'empty'
+  if (phase === 'failed' && failedTaskId === selectedId) return 'failed'
+  if (loadedTaskId === selectedId && failedTaskId !== selectedId) return 'ready'
+  return 'loading'
+}
+
+export type DetailLoad = {
+  phase: DetailPhase
+  loadedTaskId: string | null
+  failedTaskId: string | null
+  requestId: number
+}
+
+export function settleDetailRequest(
+  state: DetailLoad,
+  result: { requestId: number; taskId: string; selectedId: string | null; ok: boolean },
+): DetailLoad | null {
+  if (result.requestId !== state.requestId || result.selectedId !== result.taskId) return null
+  if (result.ok) {
+    return { requestId: state.requestId, phase: 'ready', loadedTaskId: result.taskId, failedTaskId: null }
+  }
+  return { requestId: state.requestId, phase: 'failed', loadedTaskId: state.loadedTaskId, failedTaskId: result.taskId }
+}
+
 export type ConnectionPhase = 'pending' | 'current' | 'disconnected' | 'reconnecting'
 
 export function connectionLabel(phase: ConnectionPhase): string {
